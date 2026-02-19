@@ -50,11 +50,15 @@ import { useFragmentBuckets } from '~/common/stores/chat/hooks/useFragmentBucket
 import { useUIPreferencesStore } from '~/common/stores/store-ui';
 import { useUXLabsStore } from '~/common/stores/store-ux-labs';
 
+import type { AttachmentDraftsStoreApi } from '~/common/attachment-drafts/store-attachment-drafts_slice';
+import { createAttachmentDraftsVanillaStore } from '~/common/attachment-drafts/store-attachment-drafts_vanilla';
+
 import { BlockOpContinue } from './BlockOpContinue';
 import { BlockOpOptions, optionsExtractFromFragments_dangerModifyFragment } from './BlockOpOptions';
 import { BlockOpUpstreamResume } from './BlockOpUpstreamResume';
 import { ContentFragments } from './fragments-content/ContentFragments';
 import { DocumentAttachmentFragments } from './fragments-attachment-doc/DocumentAttachmentFragments';
+import { EditAttachmentsBar } from './edit-attachments/EditAttachmentsBar';
 import { ImageAttachmentFragments } from './fragments-attachment-image/ImageAttachmentFragments';
 import { InReferenceToList } from './in-reference-to/InReferenceToList';
 import { VoidFragments } from './fragments-void/VoidFragments';
@@ -174,6 +178,7 @@ export function ChatMessage(props: {
 
   // state
   const blocksRendererRef = React.useRef<HTMLDivElement>(null);
+  const editAttachmentsStoreRef = React.useRef<AttachmentDraftsStoreApi | null>(null);
   const [isHovering, setIsHovering] = React.useState(false);
   const [selText, setSelText] = React.useState<string | null>(null);
   const [bubbleAnchor, setBubbleAnchor] = React.useState<HTMLElement | null>(null);
@@ -282,18 +287,40 @@ export function ChatMessage(props: {
   const handleApplyAllEdits = React.useCallback(async (withControl: boolean) => {
     const state = textContentEditState || {};
     setTextContentEditState(null);
+
+    // apply text edits
     for (const [fragmentId, editedText] of Object.entries(state))
       handleApplyEdit(fragmentId, editedText);
+
+    // land attachment drafts from the edit session: take all fragments and append to message
+    const tempStore = editAttachmentsStoreRef.current;
+    if (tempStore) {
+      const attachmentFragments = await tempStore.getState().takeAllFragments('global', 'app-chat');
+      for (const fragment of attachmentFragments)
+        onMessageFragmentAppend?.(messageId, fragment);
+      editAttachmentsStoreRef.current = null;
+    }
+
     // if the user pressed Ctrl, we begin a regeneration from here
     if (withControl && onMessageAssistantFrom)
       await onMessageAssistantFrom(messageId, 0);
-  }, [handleApplyEdit, messageId, onMessageAssistantFrom, textContentEditState]);
+  }, [handleApplyEdit, messageId, onMessageAssistantFrom, onMessageFragmentAppend, textContentEditState]);
 
   const handleEditsApplyClicked = React.useCallback(() => handleApplyAllEdits(false), [handleApplyAllEdits]);
 
-  const handleEditsBegin = React.useCallback(() => setTextContentEditState({}), []);
+  const handleEditsBegin = React.useCallback(() => {
+    editAttachmentsStoreRef.current = createAttachmentDraftsVanillaStore();
+    setTextContentEditState({});
+  }, []);
 
-  const handleEditsCancel = React.useCallback(() => setTextContentEditState(null), []);
+  const handleEditsCancel = React.useCallback(() => {
+    // clean up temp attachment store (disposes DBlob assets)
+    if (editAttachmentsStoreRef.current) {
+      editAttachmentsStoreRef.current.getState().removeAllAttachmentDrafts();
+      editAttachmentsStoreRef.current = null;
+    }
+    setTextContentEditState(null);
+  }, []);
 
   const handleEditSetText = React.useCallback((fragmentId: DMessageFragmentId, editedText: string, applyNow: boolean) => {
     if (applyNow)
@@ -836,6 +863,14 @@ export function ChatMessage(props: {
               disableMarkdownText={disableMarkdown}
               onFragmentDelete={!props.onMessageFragmentDelete ? undefined : handleFragmentDelete}
               onFragmentReplace={!props.onMessageFragmentReplace ? undefined : handleFragmentReplace}
+            />
+          )}
+
+          {/* Edit Mode: Add Attachments Bar */}
+          {isEditingText && !!editAttachmentsStoreRef.current && !!props.onMessageFragmentAppend && (
+            <EditAttachmentsBar
+              attachmentDraftsStoreApi={editAttachmentsStoreRef.current}
+              isMobile={props.isMobile}
             />
           )}
 
