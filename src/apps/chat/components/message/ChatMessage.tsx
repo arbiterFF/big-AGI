@@ -45,6 +45,8 @@ import { TooltipOutlined } from '~/common/components/TooltipOutlined';
 import { adjustContentScaling, themeScalingMap, themeZIndexChatBubble } from '~/common/app.theme';
 import { avatarIconSx, makeMessageAvatarIcon, messageBackground, useMessageAvatarLabel } from '~/common/util/dMessageUtils';
 import { clipboardCopyDOMSelectionOrFallback, copyToClipboard } from '~/common/util/clipboardUtils';
+import type { AttachmentDraftsStoreApi } from '~/common/attachment-drafts/store-attachment-drafts_slice';
+import { createAttachmentDraftsVanillaStore } from '~/common/attachment-drafts/store-attachment-drafts_vanilla';
 import { createTextContentFragment, DMessageFragment, DMessageFragmentId, updateFragmentWithEditedText } from '~/common/stores/chat/chat.fragments';
 import { useFragmentBuckets } from '~/common/stores/chat/hooks/useFragmentBuckets';
 import { useUIPreferencesStore } from '~/common/stores/store-ui';
@@ -60,6 +62,8 @@ import { VoidFragments } from './fragments-void/VoidFragments';
 import { messageAsideColumnSx, messageAvatarLabelAnimatedSx, messageAvatarLabelSx, messageZenAsideColumnSx } from './ChatMessage.styles';
 import { setIsNotificationEnabledForModel, useChatShowTextDiff } from '../../store-app-chat';
 import { useSelHighlighterMemo } from './useSelHighlighterMemo';
+
+const LazyEditAttachmentsSources = React.lazy(() => import('./edit-attachments/EditAttachmentsSources').then(m => ({ default: m.EditAttachmentsSources })));
 
 
 // Enable the menu on text selection
@@ -179,6 +183,7 @@ export function ChatMessage(props: {
   const [contextMenuAnchor, setContextMenuAnchor] = React.useState<HTMLElement | null>(null);
   const [opsMenuAnchor, setOpsMenuAnchor] = React.useState<HTMLElement | null>(null);
   const [textContentEditState, setTextContentEditState] = React.useState<ChatMessageTextPartEditState | null>(null);
+  const editAttachmentsStoreRef = React.useRef<AttachmentDraftsStoreApi | null>(null);
 
   // external state
   const { adjContentScaling, disableMarkdown, doubleClickToEdit, uiComplexityMode } = useUIPreferencesStore(useShallow(state => ({
@@ -282,16 +287,32 @@ export function ChatMessage(props: {
     setTextContentEditState(null);
     for (const [fragmentId, editedText] of Object.entries(state))
       handleApplyEdit(fragmentId, editedText);
+
+    // land new attachment drafts from the edit session
+    if (editAttachmentsStoreRef.current && onMessageFragmentAppend) {
+      const fragments = await editAttachmentsStoreRef.current.getState().takeAllFragments('global', 'app-chat');
+      for (const fragment of fragments)
+        onMessageFragmentAppend(messageId, fragment);
+    }
+    editAttachmentsStoreRef.current = null;
+
     // if the user pressed Ctrl, we begin a regeneration from here
     if (withControl && onMessageAssistantFrom)
       await onMessageAssistantFrom(messageId, 0);
-  }, [handleApplyEdit, messageId, onMessageAssistantFrom, textContentEditState]);
+  }, [handleApplyEdit, messageId, onMessageAssistantFrom, onMessageFragmentAppend, textContentEditState]);
 
   const handleEditsApplyClicked = React.useCallback(() => handleApplyAllEdits(false), [handleApplyAllEdits]);
 
-  const handleEditsBegin = React.useCallback(() => setTextContentEditState({}), []);
+  const handleEditsBegin = React.useCallback(() => {
+    editAttachmentsStoreRef.current = createAttachmentDraftsVanillaStore();
+    setTextContentEditState({});
+  }, []);
 
-  const handleEditsCancel = React.useCallback(() => setTextContentEditState(null), []);
+  const handleEditsCancel = React.useCallback(() => {
+    editAttachmentsStoreRef.current?.getState().removeAllAttachmentDrafts();
+    editAttachmentsStoreRef.current = null;
+    setTextContentEditState(null);
+  }, []);
 
   const handleEditSetText = React.useCallback((fragmentId: DMessageFragmentId, editedText: string, applyNow: boolean) => {
     if (applyNow)
@@ -820,6 +841,15 @@ export function ChatMessage(props: {
             onContextMenu={(props.onMessageFragmentReplace && ENABLE_CONTEXT_MENU) ? handleBlocksContextMenu : undefined}
             onDoubleClick={(props.onMessageFragmentReplace /*&& doubleClickToEdit disabled, as we may have shift too */) ? handleBlocksDoubleClick : undefined}
           />
+
+          {/* Edit Mode: Attachment Sources (lazy-loaded) */}
+          {isEditingText && editAttachmentsStoreRef.current && (
+            <React.Suspense fallback={null}>
+              <LazyEditAttachmentsSources
+                attachmentDraftsStoreApi={editAttachmentsStoreRef.current}
+              />
+            </React.Suspense>
+          )}
 
           {/* Document Fragments */}
           {nonImageAttachments.length >= 1 && (
